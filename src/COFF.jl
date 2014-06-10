@@ -1,6 +1,11 @@
 module COFF
 
-export readmeta
+# This package implements the ObjFileBase interface
+import ObjFileBase
+import ObjFileBase: sectionsize, sectionoffset, readheader
+
+# Reexports from ObjFileBase
+export sectionsize, sectionoffset, readheader
 
 using StrPack
 
@@ -217,7 +222,7 @@ print(io::IO,x::tiny_fixed_string) = print(io,bytestring(x))
 
 *(a::ASCIIString,b::tiny_fixed_string) = a*bytestring(b)
 
-@struct immutable SectionHeader
+@struct immutable SectionHeader <: ObjFileBase.Section{COFFHandle}
     Name::tiny_fixed_string
     VirtualSize::Uint32
     VirtualAddress::Uint32
@@ -294,7 +299,7 @@ function symname(sname::SymbolName;  kwargs...)
     takebuf_string(buf)
 end
 
-@struct immutable SymtabEntry
+@struct immutable SymtabEntry <: ObjFileBase.SymtabEntry{COFFHandle}
     Name::SymbolName
     Value::Uint32
     SectionNumber::Uint16
@@ -355,7 +360,7 @@ immutable Sections
     end
 end
 
-immutable SectionRef
+immutable SectionRef <: ObjFileBase.SectionRef{COFFHandle}
     handle::COFFHandle
     no::Int
     offset::Int
@@ -385,7 +390,7 @@ done(s::Sections,n) = n > length(s)
 next(s::Sections,n) = (s[n],n+1)
 
 # # Symbols
-immutable Symbols
+immutable Symbols 
     h::COFFHandle
     num::Uint16
     offset::Int
@@ -395,7 +400,7 @@ immutable Symbols
     end
 end
 
-immutable SymbolRef
+immutable SymbolRef <: ObjFileBase.SymbolRef{COFFHandle}
     handle::COFFHandle
     num::Uint16
     offset::Int
@@ -581,6 +586,12 @@ import Base: readbytes
 
 readbytes{T<:IO}(io::COFFHandle{T},sec::SectionHeader) = (seek(io,sec.PointerToRawData); readbytes(io, sec.SizeOfRawData))
 readbytes(sec::SectionRef) = readbytes(sec.handle,sec.header)
+
+function sectionsize(sec::SectionHeader)
+    return VirtualAddress == 0 ?
+        sec.SizeOfRawData : min(sec.SizeOfRawData, sec.VirtualSize)
+end
+sectionoffset(sec::SectionHeader) = sec.PointerToRawData
 
 ### DWARF support
 
