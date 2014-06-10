@@ -6,7 +6,7 @@ using StrPack
 
 import Base: show
 
-export readmeta, readheader, Sections, Symbols, debugsections
+export readmeta, readheader, Sections, Symbols, debugsections, Relocations
 
 include("constants.jl")
 
@@ -253,9 +253,8 @@ function show(io::IO, header::SectionHeader; strtab = nothing)
     printentry(io,"PointerToRawData", "0x", hex(header.PointerToRawData))
     printentry(io,"PointerToRelocations", "0x", hex(header.PointerToRelocations))
     printentry(io,"PointerToLinenumbers", "0x", hex(header.PointerToLinenumbers))
-    printentry(io,"NumberOfRelocations", "0x", hex(header.PointerToLinenumbers))
-    printentry(io,"NumberOfRelocations", "0x", hex(header.PointerToLinenumbers))
-    printentry(io,"NumberOfLinenumbers", "0x", hex(header.PointerToLinenumbers))
+    printentry(io,"NumberOfRelocations", "0x", hex(header.NumberOfRelocations))
+    printentry(io,"NumberOfLinenumbers", "0x", hex(header.NumberOfLinenumbers))
     Characteristics = ASCIIString[]
     for (k,v) in IMAGE_SCN_CHARACTERISTICS
         if k & IMAGE_SCN_ALIGN_MASK != 0
@@ -274,15 +273,25 @@ end
     name::Uint64
 end
 
-function show(io::IO, sname::SymbolName; strtab = nothing)
+function show(io::IO, sname::SymbolName; strtab = nothing, showredirect=true)
     if sname.name & typemax(Uint32) == 0
-        print(io, "/", sname.name >> 32)
         if strtab !== nothing
-            print(io, sname.name >> 32, " => ", strtab_lookup(strtab,sname.name>>32))
+            if showredirect
+                print(io, sname.name >> 32, " => ")
+            end
+            print(io,strtab_lookup(strtab,sname.name>>32))
+        else
+            print(io, "/", sname.name >> 32)
         end
     else
         print(io,bytestring(tiny_fixed_string(sname.name)))
     end
+end
+
+function symname(sname::SymbolName;  kwargs...)
+    buf = IOBuffer()
+    show(buf,sname; kwargs...)
+    takebuf_string(buf)
 end
 
 @struct immutable SymtabEntry
@@ -293,6 +302,8 @@ end
     StorageClass::Uint8
     NumberOfAuxSymbols::Uint8
 end align_packed
+
+symname(sname::SymtabEntry; kwargs...) = symname(sname.Name; kwargs...)
 
 function show(io::IO, entry::SymtabEntry; strtab = nothing)
     print(io, "0x", hex(entry.Value, 8), " ")
@@ -308,6 +319,25 @@ function show(io::IO, entry::SymtabEntry; strtab = nothing)
     print(io, " ",hex(entry.Type, 4)," ")
     #print(io, IMAGE_SYM_CLASS[entry.StorageClass]," ")
     show(io, entry.Name; strtab = strtab)
+end
+
+@struct immutable RelocationEntry
+    VirtualAddress::Uint32
+    SymbolTableIndex::Uint32
+    Type::Uint16
+end align_packed
+
+function show(io::IO, entry::RelocationEntry; machine=IMAGE_FILE_MACHINE_UNKNOWN, syms = northing, strtab=nothing)
+    print(io, "0x", hex(entry.VirtualAddress,8), " ")
+    if machine == IMAGE_FILE_MACHINE_UNKNOWN
+        print(io,hex(entry.Type,4)," ")
+    else
+        printfield(io,MachineRelocationMap[machine][entry.Type],maximum(map(length,MachineRelocationMap[machine])))
+    end
+    printfield(io,"@"*string(dec(entry.SymbolTableIndex)),6)
+    if syms !== nothing
+        print(io," -> ",symname(syms[entry.SymbolTableIndex+1]; strtab = strtab))
+    end
 end
 
 # # # Higer level interface
@@ -371,6 +401,7 @@ immutable SymbolRef
     offset::Int
     entry::SymtabEntry
 end
+symname(sym::SymbolRef; kwargs...) = symname(sym.entry; kwargs...)
 
 function show(io::IO,x::SymbolRef)
     print(io,'[')
@@ -434,12 +465,122 @@ function readmeta(io::IO)
         # PE File
         seek(io, start+off)
         read(io, Uint32) == PEMAGIC || error("Invalid PE magic")
+    else
+        seek(io,start)
     end
     COFFHandle(io,start,position(io))
 end
 
 readheader(h::COFFHandle) = (seek(h.io,h.header); unpack(h, COFFHeader))
 
+### Relocation support
+
+immutable Relocations
+    h::COFFHandle
+    machine::Int
+    sect::SectionHeader
+end
+
+immutable RelocationRef
+    h::COFFHandle
+    machine::Int
+    reloc::RelocationEntry
+end
+
+show(io::IO, x::RelocationRef) = show(io,x.reloc; machine=x.machine, syms=Symbols(x.h), strtab=strtab(x.h))
+
+Relocations(s::SectionRef) = Relocations(s.handle,readheader(s.handle).Machine,s.header)
+
+length(s::Relocations) = s.sect.NumberOfRelocations
+const RelocationEntrySize = StrPack.calcsize(RelocationEntry)
+function getindex(s::Relocations,n)
+    if n < 1 || n > length(s)
+        throw(BoundsError())
+    end
+    offset = s.sect.PointerToRelocations + (n-1)*RelocationEntrySize
+    seek(s.h,offset)
+    RelocationRef(s.h,s.machine,unpack(s.h, RelocationEntry))
+end
+
+start(s::Relocations) = 1
+done(s::Relocations,n) = n > length(s)
+next(s::Relocations,n) = (x=s[n];(x,n+1))
+
+printtargetsymbol(io::IO,reloc::RelocationEntry, syms, strtab) = print(io,symname(syms[reloc.SymbolTableIndex+1]; strtab = strtab, showredirect = false))
+
+function printRelocationInterpretation(io::IO, reloc::RelocationEntry, LocalValue::Uint64, machine, syms, sects, strtab)
+    if machine == IMAGE_FILE_MACHINE_AMD64
+        if reloc.Type == IMAGE_REL_AMD64_ABSOLUTE
+            print(io,"0x",hex(LocalValue))
+        elseif reloc.Type == IMAGE_REL_AMD64_ADDR64
+            print(io,"(uint64_t) ")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io," + 0x",hex(LocalValue,16))
+        elseif reloc.Type == IMAGE_REL_AMD64_ADDR32
+            print(io,"(uint32_t) ")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io," + 0x",hex(LocalValue,8))
+        elseif reloc.Type == IMAGE_REL_AMD64_ADDR32NB
+            print(io,"(uint32_t) ")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io," + 0x",hex(LocalValue,8))
+            print(io," - ImageBase")
+        elseif reloc.Type >= IMAGE_REL_AMD64_REL32 && reloc.Type <= IMAGE_REL_AMD64_REL32_5
+            print(io,"(uint32_t) @pc-")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io," + 0x",hex(LocalValue,8))
+            add = reloc.Type-IMAGE_REL_AMD64_REL32
+            print(io," + ",add)
+        elseif reloc.Type == IMAGE_REL_AMD64_SECTION
+            print(io,"(uint16_t) indexof(")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io,")")
+            LocalValue != 0 && print(io,"+",dec(LocalValue))
+        elseif reloc.Type == IMAGE_REL_AMD64_SECREL
+            print(io,"(uint32_t) ")
+            printtargetsymbol(io, reloc, syms, strtab)
+            print(io," - ")
+            # Get the symbol's section
+            sect = sects[syms[reloc.SymbolTableIndex].entry.SectionNumber]
+            print(io,sectname(sect))
+        else
+            error("Unsupported Relocations")
+        end
+    else
+        error("Relocation Support not implemented for this Machine Type")
+    end
+end
+
+function relocationLength(reloc::RelocationEntry)
+    reloc.Type == IMAGE_REL_AMD64_ABSOLUTE ? 0 :
+    reloc.Type == IMAGE_REL_AMD64_ADDR64 ? 8 :
+    reloc.Type >= IMAGE_REL_AMD64_ADDR32 &&
+    reloc.Type <= IMAGE_REL_AMD64_REL32_5 ? 4 :
+    reloc.Type == IMAGE_REL_AMD64_SECTION ? 2 :
+    reloc.Type == IMAGE_REL_AMD64_SECREL ? 4 :
+    reloc.Type == IMAGE_REL_AMD64_SECREL7 ? 1 :
+    error("Unknown relocation type")
+end
+
+function inspectRelocations(sect::SectionRef, relocs = Relocations(sect))
+    data = readbytes(sect);
+    handle = sect.handle
+    header = readheader(handle)
+    for x in relocs[1:10]
+      offset = x.reloc.VirtualAddress -sect.header.VirtualAddress
+      size = COFF.relocationLength(x.reloc)
+      # zext
+      Local = reinterpret(Uint64,vcat(data[offset:offset+size],zeros(sizeof(Uint64)-size)))[1]
+      print("*(",sectname(sect),"+0x",hex(offset,8),") = ")
+      COFF.printRelocationInterpretation(STDOUT, x.reloc, Local, header.Machine, Symbols(handle), Sections(handle), COFF.strtab(handle))
+      println()
+    end
+end
+
+import Base: readbytes
+
+readbytes{T<:IO}(io::COFFHandle{T},sec::SectionHeader) = (seek(io,sec.PointerToRawData); readbytes(io, sec.SizeOfRawData))
+readbytes(sec::SectionRef) = readbytes(sec.handle,sec.header)
 
 ### DWARF support
 
