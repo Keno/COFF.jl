@@ -1,18 +1,19 @@
+__precompile__()
 module COFF
 
 # This package implements the ObjFileBase interface
 import ObjFileBase
 import ObjFileBase: sectionsize, sectionoffset, readheader, debugsections, deref,
-    endianness, strtab_lookup
+    endianness, strtab_lookup, readmeta, isrelocatable, sectionname
 
 # Reexports from ObjFileBase
 export sectionsize, sectionoffset, readheader, debugsections
 
-using StrPack
+using StructIO
 
 import Base: show, ==, *
 
-export readmeta, Sections, Symbols, Relocations
+export Symbols, Relocations
 
 include("constants.jl")
 
@@ -36,7 +37,9 @@ type COFFHandle{T<:IO} <: COFFObjectHandle
     strtab
     COFFHandle(io,start,header) = new(io,start,header)
 end
+ObjFileBase.handle(h::COFFHandle) = h
 COFFHandle{T<:IO}(io::T,start,header) = COFFHandle{T}(io,start,header)
+__init__() = push!(ObjFileBase.ObjHandles, COFFHandle)
 
 endianness(x::COFFHandle) = :NativeEndian
 
@@ -44,16 +47,11 @@ show(io::IO, x::COFFHandle) = print(io, "COFF Object Handle")
 
 import Base: read, readuntil, readbytes, write, seek, seekstart, position
 
-for f in (:read,:readuntil,:readbytes,:write)
-    @eval $(f){T<:IO}(io::COFFHandle{T},args...) = $(f)(io.io,args...)
-end
-
-
 seek{T<:IO}(io::COFFHandle{T},pos) = seek(io.io,io.start+pos)
 seekstart(io::COFFHandle) = seek(io.io,io.start)
 position{T<:IO}(io::COFFHandle{T}) = position(io.io)-io.start
 
-import StrPack: pack, unpack
+import StructIO: pack, unpack
 
 unpack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = unpack(h.io,T,:NativeEndian)
 pack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = pack(h.io,T,:NativeEndian)
@@ -78,6 +76,8 @@ function printfield(io::IO,string,fieldlength)
 end
 printentry(io::IO,header,values...) = (printfield(io,header,21);println(io," ",values...))
 
+isrelocatable(h::COFFHeader) = (h.Characteristics & (IMAGE_FILE_DLL | IMAGE_FILE_EXECUTABLE_IMAGE)) == 0
+isrelocatable(h::COFFHandle) = isrelocatable(readheader(h))
 
 using Base.Dates
 
@@ -88,7 +88,7 @@ function show(io::IO,h::COFFHeader)
     printentry(io,"PointerToSymbolTable", "0x",hex(h.PointerToSymbolTable))
     printentry(io,"NumberOfSymbols", h.NumberOfSymbols)
     printentry(io,"SizeOfOptionalHeader", h.SizeOfOptionalHeader)
-    Characteristics = ASCIIString[]
+    Characteristics = String[]
     for (k,v) in IMAGE_FILE_CHARACTERISTICS
         ((k&h.Characteristics) != 0) && push!(Characteristics, v)
     end
@@ -134,7 +134,7 @@ end
 end
 
 module PE32
-    using StrPack
+    using StructIO
     import ..OptionalHeaderStandard, ..DataDirectories
 
     @struct immutable OptionalHeaderWindows
@@ -173,7 +173,7 @@ end
 
 
 module PE32Plus
-    using StrPack
+    using StructIO
     import ..OptionalHeaderStandard, ..DataDirectories
 
     @struct immutable OptionalHeaderWindows
@@ -241,11 +241,11 @@ print(io::IO,x::tiny_fixed_string) = print(io,bytestring(x))
     Characteristics::UInt32
 end
 
-function sectname(header::SectionHeader; strtab = nothing, errstrtab=true)
+function sectionname(header::SectionHeader; strtab = nothing, errstrtab=true)
     name = bytestring(header.Name)
     if name[1] == '/'
         if strtab != nothing
-            return strtab_lookup(strtab,parseint(name[2:end]))
+            return strtab_lookup(strtab,parse(Int, name[2:end]))
         elseif errstrtab
             error("Section name refers to the strtab, but no strtab given")
         end
@@ -256,7 +256,7 @@ end
 
 function show(io::IO, header::SectionHeader; strtab = nothing)
     name = bytestring(header.Name)
-    name2 = sectname(header; strtab = strtab, errstrtab=false)
+    name2 = sectionname(header; strtab = strtab, errstrtab=false)
     printentry(io,"Name",name,name!=name2?" => "*name2:"")
     printentry(io,"VirtualSize", "0x", hex(header.VirtualSize))
     printentry(io,"VirtualAddress", "0x", hex(header.VirtualAddress))
@@ -266,7 +266,7 @@ function show(io::IO, header::SectionHeader; strtab = nothing)
     printentry(io,"PointerToLinenumbers", "0x", hex(header.PointerToLinenumbers))
     printentry(io,"NumberOfRelocations", "0x", hex(header.NumberOfRelocations))
     printentry(io,"NumberOfLinenumbers", "0x", hex(header.NumberOfLinenumbers))
-    Characteristics = ASCIIString[]
+    Characteristics = String[]
     for (k,v) in IMAGE_SCN_CHARACTERISTICS
         if k & IMAGE_SCN_ALIGN_MASK != 0
             continue
@@ -356,7 +356,7 @@ end
 import Base: length, getindex, start, done, next
 
 # # Sections
-immutable Sections
+immutable Sections <: ObjFileBase.Sections{COFFHandle}
     h::COFFHandle
     num::UInt16
     offset::Int
@@ -365,6 +365,9 @@ immutable Sections
         Sections(handle, header.NumberOfSections, handle.header + sizeof(COFFHeader) + header.SizeOfOptionalHeader)
     end
 end
+ObjFileBase.handle(s::Sections) = s.h
+ObjFileBase.Sections(h::COFFHandle) = Sections(h)
+ObjFileBase.mangle_sname(h::COFFHandle, name) = string(".", name)
 
 immutable SectionRef <: ObjFileBase.SectionRef{COFFHandle}
     handle::COFFHandle
@@ -373,7 +376,8 @@ immutable SectionRef <: ObjFileBase.SectionRef{COFFHandle}
     header::SectionHeader
 end
 
-sectname(ref::SectionRef) = sectname(ref.header; strtab=strtab(ref.handle))
+ObjFileBase.handle(s::SectionRef) = s.handle
+sectionname(ref::SectionRef) = sectionname(ref.header; strtab=strtab(ref.handle))
 deref(ref::SectionRef) = ref.header
 
 function show(io::IO,x::SectionRef)
@@ -382,7 +386,7 @@ show(io, x.header; strtab=strtab(x.handle))
 end
 
 length(s::Sections) = s.num
-const SectionHeaderSize = StrPack.calcsize(SectionHeader)
+const SectionHeaderSize = sizeof(SectionHeader)
 function getindex(s::Sections,n)
     if n < 1 || n > length(s)
         throw(BoundsError())
@@ -423,7 +427,7 @@ function show(io::IO,x::SymbolRef)
 end
 
 endof(s::Symbols) = s.num
-const SymtabEntrySize = StrPack.calcsize(SymtabEntry)
+const SymtabEntrySize = sizeof(SymtabEntry)
 function getindex(s::Symbols,n)
     if n < 1 || n > endof(s)
         throw(BoundsError())
@@ -458,6 +462,7 @@ function strtab(h::COFFHandle)
     end
     h.strtab = StrTab(h)
 end
+ObjFileBase.StrTab(h::COFFHandle) = strtab(h)
 
 function strtab_lookup(strtab::StrTab, offset)
     seek(strtab.h,offset+strtab.offset)
@@ -468,7 +473,7 @@ end
 
 const PEMAGIC = reinterpret(UInt32,UInt8['P','E','\0','\0'])[1]
 const MZ = reinterpret(UInt16,UInt8['M','Z'])[1]
-function readmeta(io::IO)
+function readmeta(io::IO, ::Type{COFFHandle})
     start = position(io)
     if read(io,UInt16) == MZ
         # Get the PE Header offset
@@ -504,7 +509,7 @@ show(io::IO, x::RelocationRef) = show(io,x.reloc; machine=x.machine, syms=Symbol
 Relocations(s::SectionRef) = Relocations(s.handle,readheader(s.handle).Machine,s.header)
 
 length(s::Relocations) = s.sect.NumberOfRelocations
-const RelocationEntrySize = StrPack.calcsize(RelocationEntry)
+const RelocationEntrySize = sizeof(RelocationEntry)
 function getindex(s::Relocations,n)
     if n < 1 || n > length(s)
         throw(BoundsError())
@@ -554,7 +559,7 @@ function printRelocationInterpretation(io::IO, reloc::RelocationEntry, LocalValu
             print(io," - ")
             # Get the symbol's section
             sect = sects[syms[reloc.SymbolTableIndex].entry.SectionNumber]
-            print(io,sectname(sect))
+            print(io,sectionname(sect))
         else
             error("Unsupported Relocations")
         end
@@ -585,7 +590,7 @@ function inspectRelocations(sect::SectionRef, relocs = Relocations(sect))
       # + 1 for 1-indexed array
       Ld = data[offset+1:offset+size]
       Local = reinterpret(UInt64,vcat(Ld,zeros(UInt8,sizeof(UInt64)-size)))[1]
-      print("*(",sectname(sect),"+0x",hex(offset,8),") = ")
+      print("*(",sectionname(sect),"+0x",hex(offset,8),") = ")
       COFF.printRelocationInterpretation(STDOUT, x.reloc, Local, header.Machine, Symbols(handle), Sections(handle), COFF.strtab(handle))
       println()
     end
@@ -608,8 +613,8 @@ using DWARF
 
 function debugsections{T<:IO}(h::COFFHandle{T})
     sects = collect(Sections(h))
-    snames = map(sectname,sects)
-    sections = Dict{ASCIIString,SectionRef}()
+    snames = map(sectionname,sects)
+    sections = Dict{String,SectionRef}()
     for i in 1:length(snames)
         # remove leading "."
         ind = findfirst(DWARF.DEBUG_SECTIONS,bytestring(snames[i])[2:end])
