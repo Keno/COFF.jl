@@ -2,16 +2,17 @@ module COFF
 
 # This package implements the ObjFileBase interface
 import ObjFileBase
-import ObjFileBase: sectionsize, sectionoffset, readheader
+import ObjFileBase: sectionsize, sectionoffset, readheader, debugsections, deref,
+    endianness, strtab_lookup
 
 # Reexports from ObjFileBase
-export sectionsize, sectionoffset, readheader
+export sectionsize, sectionoffset, readheader, debugsections
 
 using StrPack
 
-import Base: show
+import Base: show, ==, *
 
-export readmeta, readheader, Sections, Symbols, debugsections, Relocations
+export readmeta, Sections, Symbols, Relocations
 
 include("constants.jl")
 
@@ -20,7 +21,8 @@ include("constants.jl")
 #
 # Represents the actual PE/COFF file
 #
-type COFFHandle{T<:IO}
+abstract COFFObjectHandle <: ObjFileBase.ObjectHandle
+type COFFHandle{T<:IO} <: COFFObjectHandle
     # The IO object. This field is speciallized on to avoid dispatch performance
     # hits, especially when operating on an IOBuffer, which is an important
     # usecase for in-memory files
@@ -35,6 +37,10 @@ type COFFHandle{T<:IO}
     COFFHandle(io,start,header) = new(io,start,header)
 end
 COFFHandle{T<:IO}(io::T,start,header) = COFFHandle{T}(io,start,header)
+
+endianness(x::COFFHandle) = :NativeEndian
+
+show(io::IO, x::COFFHandle) = print(io, "COFF Object Handle")
 
 import Base: read, readuntil, readbytes, write, seek, seekstart, position
 
@@ -57,13 +63,13 @@ pack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = pack(h.io,T,:NativeEndian)
 # COFF Header
 #
 @struct immutable COFFHeader
-    Machine::Uint16
-    NumberOfSections::Uint16
-    TimeDateStamp::Uint32
-    PointerToSymbolTable::Uint32
-    NumberOfSymbols::Uint32
-    SizeOfOptionalHeader::Uint16
-    Characteristics::Uint16
+    Machine::UInt16
+    NumberOfSections::UInt16
+    TimeDateStamp::UInt32
+    PointerToSymbolTable::UInt32
+    NumberOfSymbols::UInt32
+    SizeOfOptionalHeader::UInt16
+    Characteristics::UInt16
 end
 
 function printfield(io::IO,string,fieldlength)
@@ -73,7 +79,7 @@ end
 printentry(io::IO,header,values...) = (printfield(io,header,21);println(io," ",values...))
 
 
-using Dates
+using Base.Dates
 
 function show(io::IO,h::COFFHeader)
     printentry(io,"Machine",IMAGE_FILE_MACHINE[h.Machine])
@@ -93,19 +99,19 @@ end
 # Optional Header
 #
 @struct immutable OptionalHeaderStandard
-    Magic::Uint16
-    MajorLinkerVersion::Uint8
-    MinorLinkerVersion::Uint8
-    SizeOfCode::Uint32
-    SizeOfInitializedData::Uint32
-    SizeOfUninitializedData::Uint32
-    AddressOfEntryPoint::Uint32
-    BaseOfCode::Uint32
+    Magic::UInt16
+    MajorLinkerVersion::UInt8
+    MinorLinkerVersion::UInt8
+    SizeOfCode::UInt32
+    SizeOfInitializedData::UInt32
+    SizeOfUninitializedData::UInt32
+    AddressOfEntryPoint::UInt32
+    BaseOfCode::UInt32
 end
 
 @struct immutable IMAGE_DATA_DIRECTORY
-    VirtualAddress::Uint32
-    Size::Uint32
+    VirtualAddress::UInt32
+    Size::UInt32
 end
 
 @struct immutable DataDirectories
@@ -132,33 +138,33 @@ module PE32
     import ..OptionalHeaderStandard, ..DataDirectories
 
     @struct immutable OptionalHeaderWindows
-        ImageBase::Uint32
-        SectionAlignment::Uint32
-        FileAlignment::Uint32
-        MajorOperatingSystemVersion::Uint16
-        MinorOperatingSystemVersion::Uint16
-        MajorImageVersion::Uint16
-        MinorImageVersion::Uint16
-        MajorSubsystemVersion::Uint16
-        MinorSubsystemVersion::Uint16
-        Win32VersionValue::Uint32
-        SizeOfImage::Uint32
-        SizeOfHeaders::Uint32
-        CheckSum::Uint32
-        Subsystem::Uint16
-        DllCharacteristics::Uint16
-        SizeOfStackReserve::Uint32
-        SizeOfStackCommit::Uint32
-        SizeOfHeapReserve::Uint32
-        SizeOfHeapCommit::Uint32
-        LoaderFlag::Uint32
-        NumberOfRvaAndSizes::Uint32
+        ImageBase::UInt32
+        SectionAlignment::UInt32
+        FileAlignment::UInt32
+        MajorOperatingSystemVersion::UInt16
+        MinorOperatingSystemVersion::UInt16
+        MajorImageVersion::UInt16
+        MinorImageVersion::UInt16
+        MajorSubsystemVersion::UInt16
+        MinorSubsystemVersion::UInt16
+        Win32VersionValue::UInt32
+        SizeOfImage::UInt32
+        SizeOfHeaders::UInt32
+        CheckSum::UInt32
+        Subsystem::UInt16
+        DllCharacteristics::UInt16
+        SizeOfStackReserve::UInt32
+        SizeOfStackCommit::UInt32
+        SizeOfHeapReserve::UInt32
+        SizeOfHeapCommit::UInt32
+        LoaderFlag::UInt32
+        NumberOfRvaAndSizes::UInt32
     end
 
 
     @struct immutable OptionalHeader
         standard::OptionalHeaderStandard
-        BaseOfData::Uint32
+        BaseOfData::UInt32
         windows::OptionalHeaderWindows
         directories::DataDirectories
     end
@@ -171,27 +177,27 @@ module PE32Plus
     import ..OptionalHeaderStandard, ..DataDirectories
 
     @struct immutable OptionalHeaderWindows
-        ImageBase::Uint64
-        SectionAlignment::Uint32
-        FileAlignment::Uint32
-        MajorOperatingSystemVersion::Uint16
-        MinorOperatingSystemVersion::Uint16
-        MajorImageVersion::Uint16
-        MinorImageVersion::Uint16
-        MajorSubsystemVersion::Uint16
-        MinorSubsystemVersion::Uint16
-        Win32VersionValue::Uint32
-        SizeOfImage::Uint32
-        SizeOfHeaders::Uint32
-        CheckSum::Uint32
-        Subsystem::Uint16
-        DllCharacteristics::Uint16
-        SizeOfStackReserve::Uint64
-        SizeOfStackCommit::Uint64
-        SizeOfHeapReserve::Uint64
-        SizeOfHeapCommit::Uint64
-        LoaderFlag::Uint32
-        NumberOfRvaAndSizes::Uint32
+        ImageBase::UInt64
+        SectionAlignment::UInt32
+        FileAlignment::UInt32
+        MajorOperatingSystemVersion::UInt16
+        MinorOperatingSystemVersion::UInt16
+        MajorImageVersion::UInt16
+        MinorImageVersion::UInt16
+        MajorSubsystemVersion::UInt16
+        MinorSubsystemVersion::UInt16
+        Win32VersionValue::UInt32
+        SizeOfImage::UInt32
+        SizeOfHeaders::UInt32
+        CheckSum::UInt32
+        Subsystem::UInt16
+        DllCharacteristics::UInt16
+        SizeOfStackReserve::UInt64
+        SizeOfStackCommit::UInt64
+        SizeOfHeapReserve::UInt64
+        SizeOfHeapCommit::UInt64
+        LoaderFlag::UInt32
+        NumberOfRvaAndSizes::UInt32
     end
 
     @struct immutable OptionalHeader
@@ -204,13 +210,13 @@ end
 # Section Table
 
 @struct immutable tiny_fixed_string
-    str::Uint64
+    str::UInt64
 end
 
 import Base: bytestring, show, print
 
 function bytestring(x::tiny_fixed_string)
-    a8 = reinterpret(Uint8,[x.str])
+    a8 = reinterpret(UInt8,[x.str])
     z = findfirst(a8,0)
     UTF8String(a8[1:(z == 0 ? length(a8) : z-1)])
 end
@@ -220,19 +226,19 @@ print(io::IO,x::tiny_fixed_string) = print(io,bytestring(x))
 ==(x::tiny_fixed_string,y::String) = bytestring(x) == y
 ==(x::String,y::tiny_fixed_string) = y==x
 
-*(a::ASCIIString,b::tiny_fixed_string) = a*bytestring(b)
+*(a::String,b::tiny_fixed_string) = a*bytestring(b)
 
-@struct immutable SectionHeader <: ObjFileBase.Section{COFFHandle}
+@struct immutable SectionHeader <: ObjFileBase.Section{COFFObjectHandle}
     Name::tiny_fixed_string
-    VirtualSize::Uint32
-    VirtualAddress::Uint32
-    SizeOfRawData::Uint32
-    PointerToRawData::Uint32
-    PointerToRelocations::Uint32
-    PointerToLinenumbers::Uint32
-    NumberOfRelocations::Uint16
-    NumberOfLinenumbers::Uint16
-    Characteristics::Uint32
+    VirtualSize::UInt32
+    VirtualAddress::UInt32
+    SizeOfRawData::UInt32
+    PointerToRawData::UInt32
+    PointerToRelocations::UInt32
+    PointerToLinenumbers::UInt32
+    NumberOfRelocations::UInt16
+    NumberOfLinenumbers::UInt16
+    Characteristics::UInt32
 end
 
 function sectname(header::SectionHeader; strtab = nothing, errstrtab=true)
@@ -275,11 +281,11 @@ function show(io::IO, header::SectionHeader; strtab = nothing)
 end
 
 @struct immutable SymbolName
-    name::Uint64
+    name::UInt64
 end
 
 function show(io::IO, sname::SymbolName; strtab = nothing, showredirect=true)
-    if sname.name & typemax(Uint32) == 0
+    if sname.name & typemax(UInt32) == 0
         if strtab !== nothing
             if showredirect
                 print(io, sname.name >> 32, " => ")
@@ -301,11 +307,11 @@ end
 
 @struct immutable SymtabEntry <: ObjFileBase.SymtabEntry{COFFHandle}
     Name::SymbolName
-    Value::Uint32
-    SectionNumber::Uint16
-    Type::Uint16
-    StorageClass::Uint8
-    NumberOfAuxSymbols::Uint8
+    Value::UInt32
+    SectionNumber::UInt16
+    Type::UInt16
+    StorageClass::UInt8
+    NumberOfAuxSymbols::UInt8
 end align_packed
 
 symname(sname::SymtabEntry; kwargs...) = symname(sname.Name; kwargs...)
@@ -327,9 +333,9 @@ function show(io::IO, entry::SymtabEntry; strtab = nothing)
 end
 
 @struct immutable RelocationEntry
-    VirtualAddress::Uint32
-    SymbolTableIndex::Uint32
-    Type::Uint16
+    VirtualAddress::UInt32
+    SymbolTableIndex::UInt32
+    Type::UInt16
 end align_packed
 
 function show(io::IO, entry::RelocationEntry; machine=IMAGE_FILE_MACHINE_UNKNOWN, syms = northing, strtab=nothing)
@@ -352,9 +358,9 @@ import Base: length, getindex, start, done, next
 # # Sections
 immutable Sections
     h::COFFHandle
-    num::Uint16
+    num::UInt16
     offset::Int
-    Sections(h::COFFHandle, num::Uint16, offset::Int) = new(h,num,offset)
+    Sections(h::COFFHandle, num::UInt16, offset::Int) = new(h,num,offset)
     function Sections(handle::COFFHandle,header::COFFHeader=readheader(handle))
         Sections(handle, header.NumberOfSections, handle.header + sizeof(COFFHeader) + header.SizeOfOptionalHeader)
     end
@@ -368,6 +374,7 @@ immutable SectionRef <: ObjFileBase.SectionRef{COFFHandle}
 end
 
 sectname(ref::SectionRef) = sectname(ref.header; strtab=strtab(ref.handle))
+deref(ref::SectionRef) = ref.header
 
 function show(io::IO,x::SectionRef)
 println(io,"0x",hex(x.offset,8),": Section #",x.no)
@@ -392,7 +399,7 @@ next(s::Sections,n) = (s[n],n+1)
 # # Symbols
 immutable Symbols 
     h::COFFHandle
-    num::Uint16
+    num::UInt16
     offset::Int
     Symbols(h::COFFHandle, num, offset) = new(h,num,offset)
     function Symbols(handle::COFFHandle,header::COFFHeader=readheader(handle))
@@ -402,7 +409,7 @@ end
 
 immutable SymbolRef <: ObjFileBase.SymbolRef{COFFHandle}
     handle::COFFHandle
-    num::Uint16
+    num::UInt16
     offset::Int
     entry::SymtabEntry
 end
@@ -442,7 +449,7 @@ end
 function StrTab(h::COFFHandle, header=readheader(h))
     offset = header.PointerToSymbolTable+header.NumberOfSymbols*SymtabEntrySize
     seek(h, offset)
-    return StrTab(h,read(h,Uint32),offset)
+    return StrTab(h,read(h,UInt32),offset)
 end
 
 function strtab(h::COFFHandle)
@@ -459,17 +466,17 @@ function strtab_lookup(strtab::StrTab, offset)
 end
 #
 
-const PEMAGIC = reinterpret(Uint32,Uint8['P','E','\0','\0'])[1]
-const MZ = reinterpret(Uint16,Uint8['M','Z'])[1]
+const PEMAGIC = reinterpret(UInt32,UInt8['P','E','\0','\0'])[1]
+const MZ = reinterpret(UInt16,UInt8['M','Z'])[1]
 function readmeta(io::IO)
     start = position(io)
-    if read(io,Uint16) == MZ
+    if read(io,UInt16) == MZ
         # Get the PE Header offset
         seek(io, start+0x3c)
-        off = read(io, Uint32)
+        off = read(io, UInt32)
         # PE File
         seek(io, start+off)
-        read(io, Uint32) == PEMAGIC || error("Invalid PE magic")
+        read(io, UInt32) == PEMAGIC || error("Invalid PE magic")
     else
         seek(io,start)
     end
@@ -513,7 +520,7 @@ next(s::Relocations,n) = (x=s[n];(x,n+1))
 
 printtargetsymbol(io::IO,reloc::RelocationEntry, syms, strtab) = print(io,symname(syms[reloc.SymbolTableIndex+1]; strtab = strtab, showredirect = false))
 
-function printRelocationInterpretation(io::IO, reloc::RelocationEntry, LocalValue::Uint64, machine, syms, sects, strtab)
+function printRelocationInterpretation(io::IO, reloc::RelocationEntry, LocalValue::UInt64, machine, syms, sects, strtab)
     if machine == IMAGE_FILE_MACHINE_AMD64
         if reloc.Type == IMAGE_REL_AMD64_ABSOLUTE
             print(io,"0x",hex(LocalValue))
@@ -571,11 +578,13 @@ function inspectRelocations(sect::SectionRef, relocs = Relocations(sect))
     data = readbytes(sect);
     handle = sect.handle
     header = readheader(handle)
-    for x in relocs[1:10]
-      offset = x.reloc.VirtualAddress -sect.header.VirtualAddress
+    for x in relocs
+      offset = x.reloc.VirtualAddress - sect.header.VirtualAddress
       size = COFF.relocationLength(x.reloc)
       # zext
-      Local = reinterpret(Uint64,vcat(data[offset:offset+size],zeros(sizeof(Uint64)-size)))[1]
+      # + 1 for 1-indexed array
+      Ld = data[offset+1:offset+size]
+      Local = reinterpret(UInt64,vcat(Ld,zeros(UInt8,sizeof(UInt64)-size)))[1]
       print("*(",sectname(sect),"+0x",hex(offset,8),") = ")
       COFF.printRelocationInterpretation(STDOUT, x.reloc, Local, header.Machine, Symbols(handle), Sections(handle), COFF.strtab(handle))
       println()
@@ -588,7 +597,7 @@ readbytes{T<:IO}(io::COFFHandle{T},sec::SectionHeader) = (seek(io,sec.PointerToR
 readbytes(sec::SectionRef) = readbytes(sec.handle,sec.header)
 
 function sectionsize(sec::SectionHeader)
-    return VirtualAddress == 0 ?
+    return sec.VirtualSize == 0 ?
         sec.SizeOfRawData : min(sec.SizeOfRawData, sec.VirtualSize)
 end
 sectionoffset(sec::SectionHeader) = sec.PointerToRawData
@@ -608,7 +617,7 @@ function debugsections{T<:IO}(h::COFFHandle{T})
             sections[DWARF.DEBUG_SECTIONS[ind]] = sects[i]
         end
     end
-    sections
+    ObjFileBase.DebugSections(h,sections)
 end
 
 end # module

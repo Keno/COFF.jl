@@ -3,7 +3,7 @@ using Base.Meta
 macro constants(array, stripprefix, expr)
     ret = Expr(:block)
     # Initialize the name lookup array
-    push!(ret.args,:(const $array = (Uint32=>ASCIIString)[]))
+    push!(ret.args,:(const $array = Dict{UInt32,String}()))
     for e in expr.args
         if !isexpr(e,:const)
             continue
@@ -13,7 +13,7 @@ macro constants(array, stripprefix, expr)
         name = string(eq.args[1])
         name = replace(name,stripprefix,"",1)
         push!(ret.args,e)
-        push!(ret.args,:($array[uint32($(eq.args[1]))] = $name))
+        push!(ret.args,:($array[UInt32($(eq.args[1]))] = $name))
     end
     return esc(ret)
 end
@@ -342,7 +342,7 @@ end
     const IMAGE_REL_M32R_TOKEN        = 0x000E #  The CLR token.
 end
 
-const MachineRelocationMap = [
+const MachineRelocationMap = Dict(
     IMAGE_FILE_MACHINE_IA64 => IMAGE_REL_IA64,
     IMAGE_FILE_MACHINE_MIPS16 => IMAGE_REL_MIPS,
     IMAGE_FILE_MACHINE_MIPSFPU16 => IMAGE_REL_MIPS,
@@ -359,7 +359,7 @@ const MachineRelocationMap = [
     IMAGE_FILE_MACHINE_POWERPCFP => IMAGE_REL_PPC,
     IMAGE_FILE_MACHINE_AMD64 => IMAGE_REL_AMD64,
     IMAGE_FILE_MACHINE_I386 => IMAGE_REL_I386
-]
+)
 
 # # # Type representations
 const IMAGE_SYM_TYPE_NULL         = 0 # No type information or unknown base type. Microsoft tools use this setting
