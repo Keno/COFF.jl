@@ -481,9 +481,11 @@ function readmeta(io::IO, ::Type{COFFHandle})
         off = read(io, UInt32)
         # PE File
         seek(io, start+off)
-        read(io, UInt32) == PEMAGIC || error("Invalid PE magic")
+        read(io, UInt32) == PEMAGIC || throw(ObjFileBase.MagicMismatch("Invalid PE magic"))
     else
         seek(io,start)
+        read(io, UInt32) == PEMAGIC || throw(ObjFileBase.MagicMismatch("Invalid PE magic"))
+        seek(io, start)
     end
     COFFHandle(io,start,position(io))
 end
