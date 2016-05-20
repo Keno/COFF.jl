@@ -47,7 +47,7 @@ show(io::IO, x::COFFHandle) = print(io, "COFF Object Handle")
 
 import Base: read, readuntil, readbytes, write, seek, seekstart, position
 
-seek{T<:IO}(io::COFFHandle{T},pos) = seek(io.io,io.start+pos)
+seek{T<:IO}(io::COFFHandle{T},pos::Integer) = seek(io.io,io.start+pos)
 seekstart(io::COFFHandle) = seek(io.io,io.start)
 position{T<:IO}(io::COFFHandle{T}) = position(io.io)-io.start
 
