@@ -4,7 +4,8 @@ module COFF
 # This package implements the ObjFileBase interface
 import ObjFileBase
 import ObjFileBase: sectionsize, sectionoffset, readheader, debugsections, deref,
-    endianness, strtab_lookup, readmeta, isrelocatable, sectionname
+    endianness, strtab_lookup, readmeta, isrelocatable, sectionname, isundef,
+    symbolvalue, handle, symname
 
 # Reexports from ObjFileBase
 export sectionsize, sectionoffset, readheader, debugsections
@@ -45,8 +46,9 @@ endianness(x::COFFHandle) = :NativeEndian
 
 show(io::IO, x::COFFHandle) = print(io, "COFF Object Handle")
 
-import Base: read, readuntil, readbytes, write, seek, seekstart, position
+import Base: read, readuntil, readbytes, write, seek, seekstart, position, eof
 
+eof(handle::COFFHandle) = eof(handle.io)
 seek{T<:IO}(io::COFFHandle{T},pos::Integer) = seek(io.io,io.start+pos)
 seekstart(io::COFFHandle) = seek(io.io,io.start)
 position{T<:IO}(io::COFFHandle{T}) = position(io.io)-io.start
@@ -301,7 +303,7 @@ end
 
 function symname(sname::SymbolName;  kwargs...)
     buf = IOBuffer()
-    show(buf,sname; kwargs...)
+    show(buf,sname; kwargs..., showredirect=false)
     takebuf_string(buf)
 end
 
@@ -314,15 +316,26 @@ end
     NumberOfAuxSymbols::UInt8
 end align_packed
 
+const IMAGE_SYM_UNDEFINED = 0
+function isundef(entry::SymtabEntry)
+    entry.StorageClass in (
+        IMAGE_SYM_CLASS_EXTERNAL_DEF,
+        IMAGE_SYM_CLASS_UNDEFINED_LABEL,
+        IMAGE_SYM_CLASS_UNDEFINED_STATIC) ||
+    (entry.StorageClass == IMAGE_SYM_CLASS_EXTERNAL &&
+        entry.SectionNumber == IMAGE_SYM_UNDEFINED)
+end
+isfunction(entry::SymtabEntry) = entry.Type == 0x20
+
 symname(sname::SymtabEntry; kwargs...) = symname(sname.Name; kwargs...)
 
 function show(io::IO, entry::SymtabEntry; strtab = nothing)
     print(io, "0x", hex(entry.Value, 8), " ")
     if entry.SectionNumber == 0
         printfield(io, "*UND*", 5)
-    elseif entry.SectionNumber == uint16(-1)
+    elseif entry.SectionNumber == (-1%UInt16)
         printfield(io, "*ABS*", 5)
-    elseif entry.SectionNumber == uint16(-2)
+    elseif entry.SectionNumber == (-2%UInt16)
         printfield(io, "*DBG*", 5)
     else
         printfield(io, dec(entry.SectionNumber), 5)
@@ -403,21 +416,47 @@ next(s::Sections,n) = (s[n],n+1)
 # # Symbols
 immutable Symbols 
     h::COFFHandle
-    num::UInt16
+    num::UInt32
     offset::Int
     Symbols(h::COFFHandle, num, offset) = new(h,num,offset)
     function Symbols(handle::COFFHandle,header::COFFHeader=readheader(handle))
         Symbols(handle, header.NumberOfSymbols, header.PointerToSymbolTable)
     end
 end
+ObjFileBase.handle(s::Symbols) = s.h
+
+# Special case until Base is fixed
+function Base.findnext(testf::Function, A::Symbols, start::Integer)
+    while !done(A, start)
+        i = start
+        val, start = next(A, i)
+        if testf(val)
+            return i
+        end
+    end
+    return 0
+end
 
 immutable SymbolRef <: ObjFileBase.SymbolRef{COFFHandle}
     handle::COFFHandle
-    num::UInt16
+    num::UInt32
     offset::Int
     entry::SymtabEntry
 end
+deref(ref::SymbolRef) = ref.entry
 symname(sym::SymbolRef; kwargs...) = symname(sym.entry; kwargs...)
+isfunction(entry::SymbolRef) = isfunction(deref(entry))
+
+function symbolvalue(entry::Union{SymtabEntry, SymbolRef}, sects)
+    entry = deref(entry)
+    Value = entry.Value
+    if entry.SectionNumber != 0 && entry.SectionNumber != (-1%UInt16) &&
+            entry.SectionNumber != (-2%UInt16)
+        sec = sects[entry.SectionNumber] 
+        Value += deref(sec).VirtualAddress
+    end
+    Value
+end
 
 function show(io::IO,x::SymbolRef)
     print(io,'[')
@@ -426,6 +465,7 @@ function show(io::IO,x::SymbolRef)
     show(io,x.entry; strtab=strtab(x.handle))
 end
 
+length(s::Symbols) = endof(s) # This is incorrect, but required due to quirks in Base
 endof(s::Symbols) = s.num
 const SymtabEntrySize = sizeof(SymtabEntry)
 function getindex(s::Symbols,n)
@@ -440,7 +480,7 @@ end
 start(s::Symbols) = 1
 done(s::Symbols,n) = n > endof(s)
 next(s::Symbols,n) = (x=s[n];(x,n+x.entry.NumberOfAuxSymbols+1))
-
+Base.iteratorsize(::Type{Symbols}) = Base.SizeUnknown()
 
 # String table
 
@@ -463,6 +503,7 @@ function strtab(h::COFFHandle)
     h.strtab = StrTab(h)
 end
 ObjFileBase.StrTab(h::COFFHandle) = strtab(h)
+ObjFileBase.StrTab(h::Symbols) = ObjFileBase.StrTab(handle(h))
 
 function strtab_lookup(strtab::StrTab, offset)
     seek(strtab.h,offset+strtab.offset)
@@ -491,7 +532,22 @@ function readmeta(io::IO, ::Type{COFFHandle})
 end
 
 readheader(h::COFFHandle) = (seek(h.io,h.header); unpack(h, COFFHeader))
-
+function readoptheader(h::COFFHandle)
+    seek(h.io,h.header + sizeof(COFFHeader))
+    standard = unpack(h, OptionalHeaderStandard)
+    if standard.Magic == 0x10b # PE32
+        BaseOfData = read(h, UInt32)
+        windows = unpack(h, PE32.OptionalHeaderWindows)
+        dirs = unpack(h, DataDirectories)
+        return PE32.OptionalHeader(standard, BaseOfData, windows, dirs)
+    elseif standard.Magic == 0x20b # PE32Plus
+        windows = unpack(h, PE32Plus.OptionalHeaderWindows)
+        dirs = unpack(h, DataDirectories)
+        return PE32Plus.OptionalHeader(standard, windows, dirs)
+    else
+        error("Unknown magic")
+    end
+end
 ### Relocation support
 
 immutable Relocations
