@@ -14,7 +14,7 @@ using StructIO
 
 import Base: show, ==, *
 
-export Symbols, Relocations
+export Relocations
 
 include("constants.jl")
 
@@ -414,7 +414,7 @@ done(s::Sections,n) = n > length(s)
 next(s::Sections,n) = (s[n],n+1)
 
 # # Symbols
-immutable Symbols 
+immutable Symbols  <: ObjFileBase.Symbols{COFFHandle}
     h::COFFHandle
     num::UInt32
     offset::Int
@@ -423,6 +423,7 @@ immutable Symbols
         Symbols(handle, header.NumberOfSymbols, header.PointerToSymbolTable)
     end
 end
+ObjFileBase.Symbols(h::COFFHandle) = Symbols(h)
 ObjFileBase.handle(s::Symbols) = s.h
 
 # Special case until Base is fixed
