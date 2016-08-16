@@ -5,7 +5,7 @@ module COFF
 import ObjFileBase
 import ObjFileBase: sectionsize, sectionoffset, readheader, debugsections, deref,
     endianness, strtab_lookup, readmeta, isrelocatable, sectionname, isundef,
-    symbolvalue, handle, symname
+    symbolvalue, handle, symname, symbolnum
 
 # Reexports from ObjFileBase
 export sectionsize, sectionoffset, readheader, debugsections
@@ -444,6 +444,7 @@ immutable SymbolRef <: ObjFileBase.SymbolRef{COFFHandle}
     offset::Int
     entry::SymtabEntry
 end
+symbolnum(ref::SymbolRef) = ref.num
 deref(ref::SymbolRef) = ref.entry
 symname(sym::SymbolRef; kwargs...) = symname(sym.entry; kwargs...)
 isfunction(entry::SymbolRef) = isfunction(deref(entry))
@@ -676,7 +677,7 @@ function debugsections{T<:IO}(h::COFFHandle{T})
     sections = Dict{String,SectionRef}()
     for i in 1:length(snames)
         # remove leading "."
-        ind = findfirst(DWARF.DEBUG_SECTIONS,bytestring(snames[i])[2:end])
+        ind = findfirst(DWARF.DEBUG_SECTIONS,String(snames[i])[2:end])
         if ind != 0
             sections[DWARF.DEBUG_SECTIONS[ind]] = sects[i]
         end
