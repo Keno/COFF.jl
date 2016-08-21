@@ -220,7 +220,7 @@ import Base: bytestring, show, print
 function bytestring(x::tiny_fixed_string)
     a8 = reinterpret(UInt8,[x.str])
     z = findfirst(a8,0)
-    UTF8String(a8[1:(z == 0 ? length(a8) : z-1)])
+    String(a8[1:(z == 0 ? length(a8) : z-1)])
 end
 show(io::IO,x::tiny_fixed_string) = show(io,bytestring(x))
 print(io::IO,x::tiny_fixed_string) = print(io,bytestring(x))
