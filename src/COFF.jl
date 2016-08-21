@@ -388,6 +388,7 @@ immutable SectionRef <: ObjFileBase.SectionRef{COFFHandle}
     offset::Int
     header::SectionHeader
 end
+@Base.pure ObjFileBase.SectionRef{T<:COFFHandle}(::Type{T}) = SectionRef
 
 ObjFileBase.handle(s::SectionRef) = s.handle
 sectionname(ref::SectionRef) = sectionname(ref.header; strtab=strtab(ref.handle))
@@ -446,8 +447,10 @@ immutable SymbolRef <: ObjFileBase.SymbolRef{COFFHandle}
 end
 symbolnum(ref::SymbolRef) = ref.num
 deref(ref::SymbolRef) = ref.entry
-symname(sym::SymbolRef; kwargs...) = symname(sym.entry; kwargs...)
+symname(sym::SymbolRef; strtab=COFF.strtab(sym.handle), kwargs...) = symname(sym.entry; strtab=strtab, kwargs...)
 isfunction(entry::SymbolRef) = isfunction(deref(entry))
+Base.seekstart(entry::SymbolRef) = seek(entry.handle,
+    sectionoffset(Sections(entry.handle)[entry.entry.SectionNumber])+entry.entry.Value)
 
 function symbolvalue(entry::Union{SymtabEntry, SymbolRef}, sects)
     entry = deref(entry)
@@ -667,6 +670,32 @@ function sectionsize(sec::SectionHeader)
 end
 sectionoffset(sec::SectionHeader) = sec.PointerToRawData
 
+### .idata parsing
+@struct immutable ImportDirectoryEntry
+    ImportLookupTableRVA::UInt32
+    Timestamp::UInt32
+    ForwarderChain::UInt32
+    NameRVA::UInt32
+    ImportAddressTableRVA::UInt32
+end
+
+immutable ImportDirectoryEntries
+    idata::SectionRef
+end
+# Does no bounds checking
+function Base.getindex(entries::ImportDirectoryEntries, i)
+    seek(entries.idata, (i-1)*sizeof(ImportDirectoryEntry))
+    unpack(entries.idata.handle, ImportDirectoryEntry)
+end
+Base.start(it::ImportDirectoryEntries) = 1
+Base.next(it::ImportDirectoryEntries,i) = (it[i], i+1)
+function Base.done(it::ImportDirectoryEntries,i)
+    x = it[i]
+    x.ImportLookupTableRVA == 0 && x.Timestamp == 0 && x.ForwarderChain == 0 &&
+        x.ImportAddressTableRVA == 0
+end
+Base.iteratorsize(it::ImportDirectoryEntries) = Base.SizeUnknown()
+
 ### DWARF support
 
 using DWARF
@@ -684,5 +713,7 @@ function debugsections{T<:IO}(h::COFFHandle{T})
     end
     ObjFileBase.DebugSections(h,sections)
 end
+
+include("mingw.jl")
 
 end # module
