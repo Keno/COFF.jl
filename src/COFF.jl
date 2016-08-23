@@ -5,7 +5,7 @@ module COFF
 import ObjFileBase
 import ObjFileBase: sectionsize, sectionoffset, readheader, debugsections, deref,
     endianness, strtab_lookup, readmeta, isrelocatable, sectionname, isundef,
-    symbolvalue, handle, symname, symbolnum
+    symbolvalue, handle, symname, symbolnum, intptr, deref
 
 # Reexports from ObjFileBase
 export sectionsize, sectionoffset, readheader, debugsections
@@ -57,7 +57,6 @@ import StructIO: pack, unpack
 
 unpack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = unpack(h.io,T,:NativeEndian)
 pack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = pack(h.io,T,:NativeEndian)
-
 
 #
 # COFF Header
@@ -553,6 +552,14 @@ function readoptheader(h::COFFHandle)
         error("Unknown magic")
     end
 end
+
+function intptr(h::COFFHandle)
+    header = readheader(h)
+    header.Machine == IMAGE_FILE_MACHINE_AMD64 ? UInt64 :
+        header.Machine == IMAGE_FILE_MACHINE_I386 ? UInt32 :
+            error("Unknown Machine Type")
+end
+
 ### Relocation support
 
 immutable Relocations
