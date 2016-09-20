@@ -53,7 +53,7 @@ seek{T<:IO}(io::COFFHandle{T},pos::Integer) = seek(io.io,io.start+pos)
 seekstart(io::COFFHandle) = seek(io.io,io.start)
 position{T<:IO}(io::COFFHandle{T}) = position(io.io)-io.start
 
-import StructIO: pack, unpack
+import StructIO: unpack
 
 unpack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = unpack(h.io,T,:NativeEndian)
 pack{T,ioT<:IO}(h::COFFHandle{ioT},::Type{T}) = pack(h.io,T,:NativeEndian)
