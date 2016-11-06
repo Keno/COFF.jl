@@ -451,12 +451,12 @@ isfunction(entry::SymbolRef) = isfunction(deref(entry))
 Base.seekstart(entry::SymbolRef) = seek(entry.handle,
     sectionoffset(Sections(entry.handle)[entry.entry.SectionNumber])+entry.entry.Value)
 
-function symbolvalue(entry::Union{SymtabEntry, SymbolRef}, sects)
+function symbolvalue(entry::Union{SymtabEntry, SymbolRef}, sects, args...)
     entry = deref(entry)
     Value = entry.Value
     if entry.SectionNumber != 0 && entry.SectionNumber != (-1%UInt16) &&
             entry.SectionNumber != (-2%UInt16)
-        sec = sects[entry.SectionNumber] 
+        sec = sects[entry.SectionNumber]
         Value += deref(sec).VirtualAddress
     end
     Value
